@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/KennyKeni/multilogin/util"
 	"io"
 	"net/http"
 	"net/url"
 	"time"
-    "github.com/KennyKeni/multilogin/constants"
+
+	"github.com/KennyKeni/multilogin/constants"
+	"github.com/KennyKeni/multilogin/util"
 )
 
 // Client allows communication with Multilogin API
@@ -33,7 +34,7 @@ func New(email string, password string) (*Client, error) {
 	if email == "" || password == "" {
 		return nil, fmt.Errorf("email and password cannot be empty")
 	}
-    password = util.GetMD5Hash(password)
+	password = util.GetMD5Hash(password)
 	return &Client{
 		email:        email,
 		passwordHash: password,
@@ -47,35 +48,35 @@ func New(email string, password string) (*Client, error) {
 }
 
 func NewAuthenticated(email string, password string) (*Client, error) {
-    client, err := New(email, password)
-    if (err != nil) {
-        return nil, err
-    }
-    err = client.authenticate()
-    if (err != nil) {
-        return nil, err
-    }
-    return client, nil
+	client, err := New(email, password)
+	if err != nil {
+		return nil, err
+	}
+	err = client.signIn()
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func NewAutomation(automationToken string) (*Client, error) {
-    if automationToken == "" {
-        return nil, fmt.Errorf("automation token cannot be empty")
-    }
-    automationTokenExp, err := getTokenExpiration(automationToken)
-    if err != nil {
-        return nil, fmt.Errorf("could not parse token expiration")
-    }
-    return &Client{
-        automationToken: automationToken,
-        automationTokenExp: automationTokenExp,
-        apiURL:          constants.ApiUrl,
-        launcherURL:     constants.LauncherURL,
-        launcherPort:    constants.LauncherPort,
-        httpClient: &http.Client{
-            Timeout: time.Second * 30,
-        },
-    }, nil
+	if automationToken == "" {
+		return nil, fmt.Errorf("automation token cannot be empty")
+	}
+	automationTokenExp, err := util.GetTokenExpiration(automationToken)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse token expiration")
+	}
+	return &Client{
+		automationToken:    automationToken,
+		automationTokenExp: automationTokenExp,
+		apiURL:             constants.ApiUrl,
+		launcherURL:        constants.LauncherURL,
+		launcherPort:       constants.LauncherPort,
+		httpClient: &http.Client{
+			Timeout: time.Second * 30,
+		},
+	}, nil
 }
 
 func (c *Client) makeApiRequest(
@@ -83,9 +84,11 @@ func (c *Client) makeApiRequest(
 	endpoint string,
 	body interface{},
 	params map[string]string,
-	authenticated bool,
 ) (*http.Response, error) {
-	resp, err := c.makeRequest(method, c.apiURL, endpoint, body, params, authenticated)
+	if err := c.ensureAuth(); err != nil {
+		return nil, err
+	}
+	resp, err := c.makeRequest(method, c.apiURL, endpoint, body, params)
 	if err != nil {
 		return nil, fmt.Errorf("error creating api request")
 	}
@@ -98,9 +101,12 @@ func (c *Client) makeLauncherRequest(
 	endpoint string,
 	body interface{},
 	params map[string]string,
-	authenticated bool,
 ) (*http.Response, error) {
-	resp, err := c.makeRequest(method, c.apiURL, endpoint, body, params, authenticated)
+	if err := c.ensureAuth(); err != nil {
+		return nil, err
+	}
+	launcherURL := fmt.Sprintf("%s:%s", c.launcherURL, c.launcherPort)
+	resp, err := c.makeRequest(method, launcherURL, endpoint, body, params)
 	if err != nil {
 		return nil, fmt.Errorf("error creating api request")
 	}
@@ -114,15 +120,43 @@ func (c *Client) makeRequest(
 	endpoint string,
 	body interface{},
 	params map[string]string,
-	authenticated bool,
 ) (*http.Response, error) {
-	if authenticated {
-		if err := c.ensureAuth(); err != nil {
-			return nil, err
-		}
+	req, err := c.buildRequest(method, baseURL, endpoint, body, params)
+	if err != nil {
+		return nil, err
 	}
 
-	// Build URL with query parameters
+	token := c.getBestToken()
+	if token == "" {
+		return nil, fmt.Errorf("error finding valid token")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	return c.httpClient.Do(req)
+}
+
+func (c *Client) makeUnauthenticatedRequest(
+	method string,
+	baseURL string,
+	endpoint string,
+	body interface{},
+	params map[string]string,
+) (*http.Response, error) {
+	req, err := c.buildRequest(method, baseURL, endpoint, body, params)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.httpClient.Do(req)
+}
+
+func (c *Client) buildRequest(
+	method string,
+	baseURL string,
+	endpoint string,
+	body interface{},
+	params map[string]string,
+) (*http.Request, error) {
 	u, err := url.Parse(baseURL + endpoint)
 	if err != nil {
 		return nil, err
@@ -158,34 +192,5 @@ func (c *Client) makeRequest(
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	if authenticated {
-		token := c.getBestToken()
-		if token == "" {
-			return nil, fmt.Errorf("error finding valid token")
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	return c.httpClient.Do(req)
-}
-
-func (c *Client) getBestToken() string {
-	// Priority: automation token > bearer token
-	if c.automationToken != "" && !c.isAutomationTokenExpired() {
-		return c.automationToken
-	}
-
-	if c.accessToken != "" && !c.isAccessTokenExpired() {
-		return c.accessToken
-	}
-
-	return ""
-}
-
-func (c *Client) isAutomationTokenExpired() bool {
-	return time.Now().After(c.automationTokenExp.Add(-5 * time.Minute))
-}
-
-func (c *Client) isAccessTokenExpired() bool {
-	return time.Now().After(c.accessTokenExp.Add(-5 * time.Minute))
+	return req, nil
 }

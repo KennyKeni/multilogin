@@ -1,44 +1,23 @@
 package client
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/KennyKeni/multilogin/model"
+	"github.com/KennyKeni/multilogin/util"
 )
 
-type AuthResponse struct {
-	Status APIStatus `json:"status"`
-	Data   AuthData  `json:"data"`
-}
-
-type APIStatus struct {
-	ErrorCode string `json:"error_code"`
-	HTTPCode  int    `json:"http_code"`
-	Message   string `json:"message"`
-}
-
-type AuthData struct {
-	RefreshToken string `json:"refresh_token"`
-	Token        string `json:"token"`
-}
-
-func (c *Client) authenticate() error {
+func (c *Client) signIn() error {
 	authData := map[string]string{
 		"email":    c.email,
 		"password": c.passwordHash,
 	}
 
-	resp, err := c.makeApiRequest(http.MethodPost, "/user/signin", authData, nil, false)
+	var authResp model.AuthResponse
+	err := c.makeRequestAndDecode(c.makeUnauthenticatedApiRequest, http.MethodPost, "/user/signin", authData, nil, &authResp)
 	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var authResp AuthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
 		return err
 	}
 
@@ -46,7 +25,7 @@ func (c *Client) authenticate() error {
 		return fmt.Errorf("auth failed: %s", authResp.Status.Message)
 	}
 
-	tokenExpiration, err := getTokenExpiration(authResp.Data.Token)
+	tokenExpiration, err := util.GetTokenExpiration(authResp.Data.Token)
 	if err != nil {
 		return err
 	}
@@ -59,16 +38,17 @@ func (c *Client) authenticate() error {
 }
 
 func (c *Client) refreshAccessToken() error {
+	if c.email == "" {
+		return fmt.Errorf("email cannot be empty")
+	}
 	payload := map[string]string{
 		"email":         c.email,
 		"refresh_token": c.refreshToken,
 	}
 
-	resp, err := c.makeApiRequest(http.MethodPost, "/user/refresh_token", payload, nil, true)
-	defer resp.Body.Close()
-
-	var authResp AuthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+	var authResp model.AuthResponse
+	err := c.makeRequestAndDecode(c.makeApiRequest, http.MethodPost, "/user/refresh_token", payload, nil, &authResp)
+	if err != nil {
 		return err
 	}
 
@@ -76,7 +56,7 @@ func (c *Client) refreshAccessToken() error {
 		return fmt.Errorf("auth failed: %s", authResp.Status.Message)
 	}
 
-	tokenExpiration, err := getTokenExpiration(authResp.Data.Token)
+	tokenExpiration, err := util.GetTokenExpiration(authResp.Data.Token)
 	if err != nil {
 		return err
 	}
@@ -89,41 +69,81 @@ func (c *Client) refreshAccessToken() error {
 }
 
 func (c *Client) getAutomationToken() error {
-    parameters := map[string]string{
-        "expiration_period": "1h",
-    }
+	parameters := map[string]string{
+		"expiration_period": "1h",
+	}
 
-    resp, err := c.makeApiRequest(http.MethodGet, "/automation_token", nil, parameters, true)
+	var automationResp model.AutomationResponse
+	err := c.makeRequestAndDecode(c.makeApiRequest, http.MethodPost, "/user/refresh_token", nil, parameters, &automationResp)
+	if err != nil {
+		return err
+	}
 
-    return nil
+	tokenExpiration, err := util.GetTokenExpiration(automationResp.Data.Token)
+	if err != nil {
+		return err
+	}
+	c.automationToken = automationResp.Data.Token
+	c.automationTokenExp = tokenExpiration
+
+	return nil
 }
 
-func getTokenExpiration(tokenString string) (time.Time, error) {
-	parts := strings.Split(tokenString, ".")
-	if len(parts) != 3 {
-		return time.Time{}, fmt.Errorf("invalid token format")
+func (c *Client) ensureAuth() error {
+	if c.automationToken != "" {
+		return c.ensureAutomationToken()
 	}
 
-	// Add padding if needed
-	payload := parts[1]
-	if len(payload)%4 != 0 {
-		payload += strings.Repeat("=", 4-len(payload)%4)
+	return c.ensureAccessToken()
+}
+
+func (c *Client) ensureAutomationToken() error {
+	if c.isAutomationTokenExpired() {
+		err := c.ensureAccessToken()
+		if err != nil {
+			return err
+		}
+		err = c.getAutomationToken()
+		if err != nil {
+			return err
+		}
 	}
 
-	decoded, err := base64.URLEncoding.DecodeString(payload)
-	if err != nil {
-		return time.Time{}, err
+	return nil
+}
+
+func (c *Client) ensureAccessToken() error {
+	// Case 1: No tokens at all - authenticate from scratch
+	if c.accessToken == "" || c.refreshToken == "" {
+		return c.signIn()
 	}
 
-	var claims map[string]interface{}
-	if err := json.Unmarshal(decoded, &claims); err != nil {
-		return time.Time{}, err
+	// Case 2: Have tokens but access token is expired - refresh it
+	if c.isAccessTokenExpired() {
+		return c.refreshAccessToken()
 	}
 
-	exp, ok := claims["exp"].(float64)
-	if !ok {
-		return time.Time{}, fmt.Errorf("exp claim not found or invalid type")
+	// Case 3: Access token is valid - nothing to do
+	return nil
+}
+
+func (c *Client) getBestToken() string {
+	// Priority: automation token > bearer token
+	if c.automationToken != "" && !c.isAutomationTokenExpired() {
+		return c.automationToken
 	}
 
-	return time.Unix(int64(exp), 0), nil
+	if c.accessToken != "" && !c.isAccessTokenExpired() {
+		return c.accessToken
+	}
+
+	return ""
+}
+
+func (c *Client) isAutomationTokenExpired() bool {
+	return time.Now().After(c.automationTokenExp.Add(-10 * time.Minute))
+}
+
+func (c *Client) isAccessTokenExpired() bool {
+	return time.Now().After(c.accessTokenExp.Add(-5 * time.Minute))
 }
