@@ -1,0 +1,29 @@
+# Test files and folders
+cmd/test/
+/test-results/
+
+# Build outputs
+/bin/
+/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Environment
+.env
+.env.local
