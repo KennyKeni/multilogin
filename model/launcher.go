@@ -13,9 +13,11 @@ type StartProfileResponse struct {
 
 // StartProfileData contains the response data from starting a profile
 type StartProfileData struct {
-	Port      string `json:"port,omitempty"`       // Automation port returned when automation_type is specified
-	Message   string `json:"message,omitempty"`    // Response message
-	ProfileID string `json:"profile_id,omitempty"` // Profile ID that was started
+	BrowserType string `json:"browser_type"`
+	CoreVersion int    `json:"core_version"`
+	ID          string `json:"id"`
+	IsQuick     bool   `json:"is_quick"`
+	Port        string `json:"port"`
 }
 
 // StopAllProfilesResponse represents the response from stopping all profiles
